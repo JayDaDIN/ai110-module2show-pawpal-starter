@@ -1,19 +1,25 @@
 classDiagram
     %% PawPal+ — four classes, one per core action of the system.
-    %% CareTask tracks work, Owner holds constraints, Scheduler plans and explains.
+    %% Task tracks work, Owner manages pets and constraints, Scheduler plans.
     %% All four are Python @dataclass types, defined in pawpal_system.py.
     %% On Scheduler, `scheduled`, `skipped` and `planned` are results of
     %% build_plan(), not constructor parameters (field(init=False)).
 
-    class CareTask {
-        +str title
+    class Task {
+        +str description
         +int duration_minutes
         +str priority
         +str category
+        +str fixed_time
         +str preferred_time
-        +str recurrence
+        +str frequency
+        +bool completed
         +priority_score() int
         +sort_key() tuple
+        +is_anchored() bool
+        +start_minutes() int
+        +mark_complete() Task
+        +mark_incomplete() Task
     }
 
     class Pet {
@@ -21,11 +27,14 @@ classDiagram
         +str species
         +str breed
         +str energy_level
-        +list~CareTask~ tasks
-        +add_task(task) CareTask
-        +remove_task(title) bool
-        +tasks_by_category(category) list~CareTask~
+        +list~Task~ tasks
+        +add_task(task) Task
+        +remove_task(description) bool
+        +tasks_by_category(category) list~Task~
+        +pending_tasks() list~Task~
+        +completed_tasks() list~Task~
         +total_task_minutes() int
+        +pending_minutes() int
     }
 
     class Owner {
@@ -34,25 +43,38 @@ classDiagram
         +str day_start
         +list~str~ preferred_times
         +bool skip_low_priority
+        +list~Pet~ pets
+        +add_pet(pet) Pet
+        +remove_pet(name) bool
+        +get_pet(name) Pet
+        +all_tasks() list~tuple~
+        +pending_tasks() list~tuple~
+        +completed_tasks() list~tuple~
+        +total_task_minutes() int
+        +pending_minutes() int
         +has_capacity_for(minutes_used, task) bool
         +minutes_remaining(minutes_used) int
         +prefers(task) bool
+        +is_overcommitted() bool
     }
 
     class Scheduler {
         +Owner owner
-        +Pet pet
         +list~dict~ scheduled
         +list~dict~ skipped
         +bool planned
         +build_plan() list~dict~
         +explain() list~str~
         +total_scheduled_minutes() int
-        -_sort_tasks(tasks) list~CareTask~
+        +tasks_for(pet_name) list~dict~
+        -_gather() tuple
+        -_place_anchored(anchored) tuple
+        -_place_flexible(flexible, placements, used) list
+        -_build_gaps(placements) list
+        -_first_gap_that_fits(gaps, duration) tuple
         -_reason_for(task) str
-        -_advance_time(clock, minutes) str
     }
 
-    Pet "1" *-- "0..*" CareTask : owns
-    Scheduler --> Owner : reads constraints from
-    Scheduler --> Pet : plans tasks for
+    Owner "1" *-- "0..*" Pet : manages
+    Pet "1" *-- "0..*" Task : owns
+    Scheduler --> Owner : plans for

@@ -14,50 +14,68 @@ I chose four classes and gave each one exactly one of the three core actions to 
 requirement has a single obvious home. All four live in `pawpal_system.py`, the logic layer, which
 is kept separate from the Streamlit UI in `app.py`.
 
-**`CareTask`** — *core action 1: track pet care tasks.*
-One unit of care work. Attributes: `title`, `duration_minutes`, `priority`, `category`,
-`preferred_time`, `recurrence`. Methods: `priority_score()` maps `high/medium/low` to `3/2/1`, and
-`sort_key()` returns `(-priority_score(), duration_minutes, title)`.
+**`Task`** — *core action 1: track pet care tasks.*
+One care activity. Attributes: `description`, `duration_minutes`, `fixed_time`, `frequency`,
+`completed`, plus `priority`, `category` and `preferred_time`. Methods: `priority_score()` maps
+`high/medium/low` to `3/2/1`; `sort_key()` returns
+`(-priority_score(), duration_minutes, description)`; `is_anchored()` and `start_minutes()` report
+whether and when the task is pinned; `mark_complete()` / `mark_incomplete()` toggle its status.
 
-Its real responsibility is **defining how tasks rank against each other**. I deliberately put this
-on the task rather than in the scheduler so priority is defined in exactly one place and the
-scheduler never hardcodes the strings `"high"`/`"medium"`/`"low"`. Changing the ranking rule means
-editing one method.
+"Time" is deliberately split into two fields. `duration_minutes` is how long the task takes;
+`fixed_time` is an optional `"HH:MM"` anchor. A task with no `fixed_time` is *flexible* — the
+scheduler decides when it happens. That split is what lets the same class express both
+"walk the dog for 30 minutes sometime" and "meds at 08:00 sharp."
+
+Its other real responsibility is **defining how tasks rank against each other**. I put this on the
+task rather than in the scheduler so priority is defined in exactly one place and the scheduler
+never hardcodes the strings `"high"`/`"medium"`/`"low"`.
 
 **`Pet`** — *core action 1: hold the tasks.*
-The subject of the plan. Attributes: `name`, `species`, `breed`, `energy_level`, and
-`tasks: list[CareTask]`. Methods: `add_task()`, `remove_task()`, `tasks_by_category()`,
-`total_task_minutes()`.
+Pet details plus the tasks belonging to that pet. Attributes: `name`, `species`, `breed`,
+`energy_level`, `tasks: list[Task]`. Methods: `add_task()`, `remove_task()`,
+`tasks_by_category()`, `pending_tasks()`, `completed_tasks()`, `total_task_minutes()`,
+`pending_minutes()`.
 
-This is a composition relationship — the pet owns its tasks, and the tasks have no meaning apart
-from the pet. `total_task_minutes()` lets the UI show how much work exists before any scheduling
-happens, which is what makes an over-budget day visible to the user.
+This is composition — the pet owns its tasks, and the tasks have no meaning apart from the pet.
+Separating `pending_tasks()` from `completed_tasks()` here means the scheduler never has to filter
+on `completed` itself.
 
-**`Owner`** — *core action 2: consider constraints.*
-Every constraint the scheduler reads, in one place. Attributes: `name`, `available_minutes`,
-`day_start`, `preferred_times`, `skip_low_priority`. Methods: `has_capacity_for()`,
-`minutes_remaining()`, `prefers()`.
+**`Owner`** — *core action 2: manage pets and constraints.*
+Manages multiple pets and holds every constraint. Attributes: `name`, `available_minutes`,
+`day_start`, `preferred_times`, `skip_low_priority`, `pets: list[Pet]`. Methods: `add_pet()`,
+`remove_pet()`, `get_pet()`, `all_tasks()`, `pending_tasks()`, `completed_tasks()`,
+`has_capacity_for()`, `minutes_remaining()`, `prefers()`, `is_overcommitted()`.
 
-The point of this class is that the scheduler never invents its own limits — it asks the owner.
-`has_capacity_for()` is the single gate every task passes through, so there is exactly one place
-the time budget can be enforced or violated. Adding a new constraint later means adding a field
-and a predicate here, not editing the scheduling loop.
+Two responsibilities, and both matter. First, **it is the single source of constraints** — the
+scheduler never invents its own limits, it asks the owner, and `has_capacity_for()` is the one gate
+every task passes through. Second, **it is the access point for every pet's tasks**: `all_tasks()`
+returns `(pet, task)` pairs rather than bare tasks, because a plan spanning several animals has to
+be able to say which pet each item belongs to.
+
+The time budget is a single shared pool rather than one slice per pet. That is the decision that
+makes the scheduler a real planner: Biscuit's medication can out-rank Mochi's playtime, which could
+not happen if each pet were scheduled independently.
 
 **`Scheduler`** — *core action 3: produce a plan and explain it.*
-The only class with algorithmic logic. Holds an `Owner` and a `Pet`; produces `scheduled` and
-`skipped`. Methods: `build_plan()`, `explain()`, `total_scheduled_minutes()`, plus the private
-helpers `_sort_tasks()`, `_reason_for()`, `_advance_time()`.
+The brain, and the only class with algorithmic logic. Holds an `Owner`; produces `scheduled`,
+`skipped` and `planned`. Methods: `build_plan()`, `explain()`, `total_scheduled_minutes()`,
+`tasks_for()`, plus the private helpers `_gather()`, `_place_anchored()`, `_place_flexible()`,
+`_build_gaps()` and `_first_gap_that_fits()`.
 
-Concentrating all the logic here is what keeps the tests focused — the other three classes are
-data and simple predicates, so almost every meaningful test points at this one class. `explain()`
-being a first-class method rather than print statements is what makes the "explain why" requirement
+It plans in four passes: drop completed and (optionally) low-priority tasks; pin the anchored tasks
+to their fixed times; compute the free gaps those anchors leave; then fill the gaps with the
+flexible tasks, highest priority and shortest first, until the shared budget runs out.
+
+Concentrating the logic here keeps the tests focused — the other three classes are data and simple
+predicates, so almost every meaningful test points at this one class. `explain()` being a
+first-class method rather than print statements is what makes the "explain why" requirement
 testable: a test can assert the reasoning mentions every scheduled and skipped task.
 
-**Relationships:** `Pet *-- CareTask` is composition (the pet owns its tasks).
-`Scheduler --> Owner` and `Scheduler --> Pet` are associations — the scheduler reads from both but
-owns neither, so the same pet and owner could be handed to a different scheduling strategy later.
+**Relationships:** `Owner *-- Pet` and `Pet *-- Task` are both composition. `Scheduler --> Owner`
+is an association — the scheduler reads from the owner but owns nothing, so the same owner could be
+handed to a different scheduling strategy later.
 
-**Implementation note:** `CareTask`, `Pet`, `Owner`, and `Scheduler` are all Python `@dataclass`es.
+**Implementation note:** `Task`, `Pet`, `Owner`, and `Scheduler` are all Python `@dataclass`es.
 This gives generated `__init__`, `__repr__`, and `__eq__`, so the classes read as declarations of
 what the data *is* rather than boilerplate assignment code, and test failures print full field
 values. Validation lives in each class's `__post_init__`, and mutable fields use
@@ -65,17 +83,63 @@ values. Validation lives in each class's `__post_init__`, and mutable fields use
 
 **b. Design changes**
 
-The design held up, but reviewing the skeleton against the UML turned up five gaps. All five were
-cases where the code allowed something the design never intended.
+### The big one: one pet became many
+
+The first version scheduled for a single pet — `Scheduler(owner, pet)` — and `Owner` held nothing
+but constraints. Restructuring so an owner manages *multiple* pets changed all four classes:
+
+- **`Owner` gained a second responsibility.** It now owns `pets: list[Pet]` and exposes
+  `all_tasks()` / `pending_tasks()` as `(pet, task)` pairs. I considered giving each pet its own
+  time slice, but a shared budget is what makes the scheduler interesting: with one pool, a
+  high-priority task for one animal genuinely competes with a low-priority task for another.
+  With separate slices the scheduler would just be running the same algorithm N times.
+- **`Scheduler` dropped its `pet` parameter.** It takes only an `Owner` now and reaches the pets
+  through it. Every slot in the plan carries a `pet` name, and `tasks_for(pet_name)` filters the
+  one timeline back down per animal.
+- **`CareTask` became `Task`**, with `title` → `description` and `recurrence` → `frequency`.
+
+### Splitting "time" into two fields
+
+The bigger conceptual change was `Task.fixed_time`. Originally every task was flexible and the
+scheduler assigned all the clock times. But real pet care has appointments — medication at 08:00
+is not negotiable. Rather than add a separate `Appointment` class (which would have made five
+classes), I gave `Task` an optional `fixed_time` and let `is_anchored()` distinguish the two kinds.
+
+That forced the scheduling algorithm to change from a single greedy pass into four:
+
+1. Drop completed tasks, and low-priority ones if the owner asked.
+2. Place anchored tasks at their fixed times.
+3. Compute the free gaps those anchors leave.
+4. Fill the gaps with flexible tasks, highest priority and shortest first.
+
+Step 3 is the part I did not anticipate. Without it, a flexible task placed right before an anchor
+would overlap it. Building an explicit list of gaps and asking `_first_gap_that_fits()` for the
+first one big enough also produced a nicer behavior for free: a short task will happily take a
+20-minute gap that a long task cannot use, so small jobs fill the cracks rather than being pushed
+to the end of the day. In the demo, Mochi's litter box lands at 07:40 precisely because it fits
+between the 07:30 feeding and the 08:00 meds.
+
+### Completion status
+
+Adding `Task.completed` raised a question the old design never had to answer: is a finished task
+*skipped*? I decided no. Completed tasks are left out of the plan silently and never appear in
+`skipped`, because `skipped` means "we wanted to do this and could not" — a reason the owner might
+act on. Finished work is reported separately by `explain()` under "Already done." They also do not
+consume budget, so ticking something off can free up room for a task that was previously skipped.
+
+### Earlier fixes, from reviewing the skeleton
+
+Reviewing the skeleton against the UML turned up five gaps, all cases where the code allowed
+something the design never intended.
 
 **1. `Pet` validated tasks on one path but not the other.** `add_task()` rejected anything that
-wasn't a `CareTask`, but the constructor accepted any list — `Pet("Mochi", tasks=["Morning walk"])`
+wasn't a `Task`, but the constructor accepted any list — `Pet("Mochi", tasks=["Morning walk"])`
 built fine and then failed much later with `AttributeError: 'str' object has no attribute
 'sort_key'` inside the scheduler. Two ways into the same list with two different rules. The
 constructor now routes through `add_task()`, so there is one type check instead of two.
 
 **2. `Scheduler` let you pass in its own results.** Making it a dataclass generated an `__init__`
-that accepted `scheduled=` and `skipped=`, so `Scheduler(owner, pet, scheduled=[...])` was legal.
+that accepted `scheduled=` and `skipped=`, so `Scheduler(owner, scheduled=[...])` was legal.
 Those are *outputs* of `build_plan()`, not inputs. Marking them `field(init=False)` keeps them out
 of the constructor. This was a change the UML already implied — the diagram lists them as
 attributes, not constructor parameters — that the dataclass conversion quietly broke.
@@ -86,12 +150,12 @@ flag so it says "No plan has been built yet" instead. Small, but the whole point
 to explain itself honestly.
 
 **4. Validation was inconsistent across fields.** `priority` and `preferred_time` were checked
-against allow-lists; `recurrence` accepted literally anything, including
-`"every third tuesday"`. Added a `RECURRENCES` allow-list to match. (`category` is still open on
+against allow-lists; `frequency` accepted literally anything, including
+`"every third tuesday"`. Added a `FREQUENCIES` allow-list to match. (`category` is still open on
 purpose — an owner might want a custom one.) Also caught that `bool` subclasses `int`, so
-`CareTask("Walk", True)` passed as a 1-minute task; that is now rejected.
+`Task("Walk", True)` passed as a 1-minute task; that is now rejected.
 
-**5. Weak type hints.** `tasks: list` and `preferred_times: list` became `list[CareTask]` and
+**5. Weak type hints.** `tasks: list` and `preferred_times: list` became `list[Task]` and
 `list[str]`, so the dataclass declarations now say what's actually in the collections.
 
 One thing I found and chose **not** to change: `_advance_time()` wraps silently at midnight, so a
@@ -110,18 +174,28 @@ allowed the scheduling tests to assert on exact output.
 
 **a. Constraints and priorities**
 
-Three constraints, in order of how strictly they're enforced:
+Four constraints, in order of how strictly they're enforced:
 
-1. **Time budget** (`Owner.available_minutes`) — a hard limit. The plan can never exceed it; there
-   is a test asserting this.
-2. **Priority** — drives the sort order. High-priority tasks get first claim on the budget.
-3. **Owner preferences** — `skip_low_priority` is a hard filter applied before scheduling.
+1. **Fixed times** (`Task.fixed_time`) — the hardest constraint. An anchored task happens at its
+   stated time or not at all; it is never moved. The only thing that can displace one is another
+   anchor that got there first.
+2. **Time budget** (`Owner.available_minutes`) — a hard limit, shared across every pet. The plan
+   can never exceed it; there is a test asserting this.
+3. **Priority** — drives the sort order for everything that isn't anchored. High-priority tasks
+   get first claim on whatever budget the anchors leave.
+4. **Owner preferences** — `skip_low_priority` is a hard filter applied before scheduling.
    `preferred_times` is *soft*: it doesn't change the ordering, it only enriches the explanation.
 
-Time ranked highest because it's the constraint the scenario is actually about — a busy owner with
-a fixed window. Priority ranked next because for a pet, missing medication is categorically worse
-than missing a grooming session. Preferences ranked last because they're about convenience, not
-the animal's welfare.
+Fixed times rank highest because they represent commitments the owner has already made — a vet
+appointment or a medication window isn't something a planner gets to second-guess. Time ranked
+next because it's the constraint the scenario is actually about: a busy owner with a fixed window.
+Priority after that, because for a pet, missing medication is categorically worse than missing a
+grooming session. Preferences last, because they're about convenience, not the animal's welfare.
+
+Note that priority deliberately does **not** out-rank anchoring. A low-priority task pinned to
+08:00 keeps that slot even if a high-priority flexible task wants it. That looks wrong at first,
+but the owner pinned it on purpose, and silently moving a task the owner explicitly scheduled
+would make the app untrustworthy.
 
 **b. Tradeoffs**
 
@@ -137,10 +211,18 @@ to say why it chose a plan, and "highest priority first, shortest first on ties"
 owner can understand and predict. A knapsack solver's output is correct but not defensible in
 plain language.
 
-One smaller tradeoff worth naming: when a task doesn't fit, the loop uses `continue` rather than
-`break`, so shorter lower-priority tasks can still be scheduled in the leftover time. This
-maximizes the number of tasks completed, at the cost of the plan no longer being in strict
-priority order. `test_shorter_task_still_fits_after_a_longer_one_is_skipped` pins this behavior.
+Two smaller tradeoffs worth naming.
+
+When a task doesn't fit, the loop uses `continue` rather than `break`, so shorter lower-priority
+tasks can still be scheduled in the leftover time. This maximizes the number of tasks completed, at
+the cost of the plan no longer being in strict priority order.
+`test_shorter_task_still_fits_after_a_longer_one_is_skipped` pins this behavior.
+
+When two anchored tasks overlap, the **earlier** one wins and the later is skipped — not the
+higher-priority one. Priority-wins would arguably be the better outcome for the pet, but
+earlier-wins is the rule an owner can predict without running the scheduler in their head, and the
+skip message names the exact conflict so they can fix it themselves. If this app grew, that is the
+first rule I'd revisit.
 
 ---
 
@@ -162,36 +244,52 @@ priority order. `test_shorter_task_still_fits_after_a_longer_one_is_skipped` pin
 
 **a. What you tested**
 
-30 tests across two files.
+57 tests across two files.
 
-`tests/test_care_task.py` — the data layer: priority score mapping, sort ordering (including the
-title tie-break), and that bad input is rejected (zero/negative duration, unknown priority,
-unknown preferred time, empty title, malformed `day_start`).
+`tests/test_models.py` — the data layer: priority score mapping, sort ordering (including the
+description tie-break), anchoring (`is_anchored()` / `start_minutes()`), completion toggling,
+managing pets (add, remove, look up, reject duplicate names), `all_tasks()` spanning every pet,
+and that bad input is rejected (zero/negative/boolean duration, unknown priority, preferred time
+or frequency, malformed `fixed_time` and `day_start`, empty description).
 
 `tests/test_scheduler.py` — the behaviors that define the product:
 
 - High-priority tasks scheduled first; shortest-first on ties
-- The plan never exceeds the time budget
+- The plan never exceeds the shared time budget
 - A task that doesn't fit is skipped *with a reason*, not silently dropped or truncated
 - A shorter task still fits after a longer one is skipped (the `continue`-not-`break` behavior)
+- Anchored tasks land at their exact fixed time, even when lower priority than flexible ones
+- Flexible tasks fill the gap *before* an anchor when they fit, and go after it when they don't
+- Two overlapping anchors: the earlier one wins, the later is skipped with a reason
+- Anchors that touch end-to-end (08:00+30 then 08:30) are *not* treated as overlapping
+- Anchored tasks count against the same shared budget as flexible ones
+- The plan spans every pet, labels each slot with its pet, and `tasks_for()` filters it back down
+- Priority beats pet order: a tight budget gives the second pet's high-priority task the slot
+- Completed tasks are left out of the plan and don't consume budget
 - `skip_low_priority` drops low tasks even when there's spare time
 - Start times advance correctly, including across an hour boundary (08:45 + 30 → 09:15)
-- Empty task list and zero available minutes don't crash
-- `explain()` mentions every scheduled *and* skipped task
+- Empty task list, no pets, and zero available minutes don't crash
+- `explain()` mentions every scheduled *and* skipped task, and says so before `build_plan()` runs
 
 That last one matters most: "explain why it chose that plan" is a core requirement, so it needs a
 test guarding it, not just a method that happens to exist.
 
+The anchor tests were the ones that caught real bugs. The end-to-end case in particular — two
+anchors where one ends exactly when the next begins — is an off-by-one trap: using `<=` instead of
+`<` in the overlap check would wrongly reject a perfectly valid back-to-back pair.
+
 **b. Confidence**
 
-Reasonably confident in the scheduling logic — the budget, ordering, and skip behaviors are all
-directly asserted, and the sort is deterministic so the tests aren't flaky.
+Reasonably confident in the scheduling logic — the budget, ordering, anchoring and skip behaviors
+are all directly asserted, and the sort is deterministic so the tests aren't flaky.
 
 Edge cases I'd test next:
-- A plan that runs past midnight (`_advance_time` wraps, but nothing asserts what *should* happen)
-- Duplicate task titles
+- A plan that runs past midnight (`_to_clock` wraps, but nothing asserts what *should* happen, and
+  a 23:00 start silently produces a 00:00 slot with no "next day" marker)
+- Duplicate task descriptions on the same pet
+- An anchored task whose fixed time is before `day_start` — currently honored, but is that right?
 - `preferred_times` actually influencing order, if that becomes a hard constraint in v2
-- Recurring tasks — `CareTask.recurrence` is stored but never acted on, so it's currently untested
+- Recurring tasks — `Task.frequency` is stored but never acted on, so it's currently untested
   because it's unimplemented
 
 ---
