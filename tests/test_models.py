@@ -190,3 +190,52 @@ def test_owner_prefers_only_matching_windows():
 def test_owner_rejects_malformed_day_start():
     with pytest.raises(ValueError):
         Owner("Jordan", day_start="8am")
+
+
+# --- validated setters, used by the Streamlit UI to edit a live Owner --------
+
+
+def test_setters_update_a_live_owner():
+    owner = Owner("Jordan")
+
+    assert owner.rename("  Sam  ") == "Sam"  # also strips
+    assert owner.set_available_minutes(45) == 45
+    assert owner.set_day_start("06:15") == "06:15"
+    assert (owner.name, owner.available_minutes, owner.day_start) == (
+        "Sam",
+        45,
+        "06:15",
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda o: o.rename(""),
+        lambda o: o.rename("   "),
+        lambda o: o.set_available_minutes(-5),
+        lambda o: o.set_available_minutes(True),
+        lambda o: o.set_available_minutes("sixty"),
+        lambda o: o.set_day_start("8am"),
+        lambda o: o.set_day_start("25:00"),
+    ],
+)
+def test_setters_reject_bad_values(call):
+    with pytest.raises(ValueError):
+        call(Owner("Jordan"))
+
+
+def test_a_rejected_setter_leaves_the_owner_unchanged():
+    # The UI shows an error and carries on, so the object must not be left
+    # half-updated when validation fails.
+    owner = Owner("Jordan", available_minutes=100, day_start="07:30")
+
+    for bad in (lambda: owner.rename(""), lambda: owner.set_day_start("nope")):
+        with pytest.raises(ValueError):
+            bad()
+
+    assert (owner.name, owner.available_minutes, owner.day_start) == (
+        "Jordan",
+        100,
+        "07:30",
+    )

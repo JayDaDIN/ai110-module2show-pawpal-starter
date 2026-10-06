@@ -199,20 +199,39 @@ class Owner:
 
     def __post_init__(self):
         """Validate the name, budget and start time, and type-check any pets."""
-        if not self.name or not str(self.name).strip():
-            raise ValueError("name cannot be empty")
-        if isinstance(self.available_minutes, bool) or not isinstance(
-            self.available_minutes, int
-        ):
-            raise ValueError("available_minutes must be zero or a positive whole number")
-        if self.available_minutes < 0:
-            raise ValueError("available_minutes must be zero or a positive whole number")
-        _to_minutes(self.day_start)  # validates the format, raises if malformed
-        self.name = self.name.strip()
+        # Each setter owns its own validation, so the constructor reuses them
+        # rather than repeating the same checks.
+        self.rename(self.name)
+        self.set_available_minutes(self.available_minutes)
+        self.set_day_start(self.day_start)
         self.preferred_times = list(self.preferred_times)
         incoming, self.pets = list(self.pets), []
         for pet in incoming:
             self.add_pet(pet)
+
+    # -- validated setters, so the UI can edit a live Owner safely --------
+
+    def rename(self, name):
+        """Change the owner's name, rejecting an empty one."""
+        if not name or not str(name).strip():
+            raise ValueError("name cannot be empty")
+        self.name = str(name).strip()
+        return self.name
+
+    def set_available_minutes(self, minutes):
+        """Set today's shared time budget, rejecting negatives and non-integers."""
+        if isinstance(minutes, bool) or not isinstance(minutes, int):
+            raise ValueError("available_minutes must be zero or a positive whole number")
+        if minutes < 0:
+            raise ValueError("available_minutes must be zero or a positive whole number")
+        self.available_minutes = minutes
+        return self.available_minutes
+
+    def set_day_start(self, value):
+        """Set the time the day begins, rejecting anything not "HH:MM"."""
+        _to_minutes(value)  # validates the format, raises if malformed
+        self.day_start = value
+        return self.day_start
 
     # -- managing pets --------------------------------------------------
 
