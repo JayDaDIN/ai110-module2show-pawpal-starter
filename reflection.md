@@ -218,11 +218,50 @@ tasks can still be scheduled in the leftover time. This maximizes the number of 
 the cost of the plan no longer being in strict priority order.
 `test_shorter_task_still_fits_after_a_longer_one_is_skipped` pins this behavior.
 
-When two anchored tasks overlap, the **earlier** one wins and the later is skipped — not the
-higher-priority one. Priority-wins would arguably be the better outcome for the pet, but
-earlier-wins is the rule an owner can predict without running the scheduler in their head, and the
-skip message names the exact conflict so they can fix it themselves. If this app grew, that is the
-first rule I'd revisit.
+When two anchored tasks overlap, the **higher-priority** one keeps the slot and the other is
+skipped; only on equal priority does the earlier task win. `_place_anchored()` gets this by
+walking the anchors in priority order rather than clock order, which settles two questions with
+one rule: who keeps a contested slot, and who gets the last of the budget.
+
+### The main tradeoff in conflict handling
+
+**When two pinned tasks clash, the loser is dropped rather than moved.**
+
+Conflict detection itself is thorough — `Task.overlaps()` compares full half-open intervals
+`[start, start + duration)`, not just start times, so Mochi's 07:30 feeding is correctly found to
+collide with Biscuit's 07:35 breakfast even though the two clock values differ. Catching only
+exact start-time matches would have missed that entirely, and in a pet-care app most real clashes
+are partial overlaps like this one, not two tasks pinned to the identical minute.
+
+What the scheduler does *after* detecting the clash is the compromise. The weaker task is skipped
+with a reason and a warning, and that is all. It is never relocated, even when there is obvious
+free time moments away: in the demo, Breakfast is dropped at 07:35 while 07:40 onward sits empty.
+A smarter scheduler would treat a losing anchor as if it had become flexible and let the gap-filler
+place it.
+
+I accepted this for three reasons:
+
+1. **A pin is a promise.** The owner typed 07:35 for a reason — a vet window, a medication
+   interval. Quietly moving it to 07:40 produces a plan that looks fine but may be wrong in a way
+   the owner cannot see. Dropping it with a loud warning fails visibly instead of silently.
+2. **It keeps the two passes independent.** Anchors are placed, then gaps are computed, then
+   flexible tasks fill them. Demoting a failed anchor into the flexible pool means the gap list is
+   no longer final when it is built, so the passes would have to interleave or repeat.
+3. **The information is not lost.** `conflict_warnings()` names both tasks and both times, so the
+   owner can repin one in seconds. The app does not need to guess what they meant.
+
+The honest cost is that `conflict_warnings()` reports *potential* clashes from the task list rather
+than what the finished plan actually did, so a task skipped for lack of budget and one skipped for
+a clash are reported through different channels. Unifying those is the first thing I would fix.
+
+### A smaller one: recurrence trades memory for history
+
+`Pet.complete_task()` retires the finished task and appends a brand new instance for the next
+occurrence. That keeps a real record of what was done and when, but it means the task list **grows
+by one every completion** and never shrinks — a daily feeding adds 365 retired tasks a year. The
+alternative, resetting one task in place, keeps the list flat but throws the history away. For a
+single-day planner the growth is invisible; for anything longer-lived, retired tasks would need
+archiving off the pet.
 
 ---
 

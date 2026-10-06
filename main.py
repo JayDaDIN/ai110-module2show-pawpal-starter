@@ -1,7 +1,9 @@
 """PawPal+ command-line demo.
 
-Builds a sample owner with two pets, gives them a mix of fixed-time and
-flexible tasks, then prints today's schedule and the reasoning behind it.
+Builds a sample owner with two pets and deliberately adds their tasks **out of
+chronological order**, so the schedule below is evidence that the scheduler
+sorts rather than echoing input order. Two tasks are pinned to the same time on
+purpose to show conflict detection warning instead of crashing.
 
 Run it with:
 
@@ -22,71 +24,72 @@ def build_demo_owner():
         species="dog",
         breed="Golden Retriever",
         energy_level="high",
-        tasks=[
-            # Anchored: the meds have to happen at 08:00 sharp.
-            Task(
-                "Heartworm meds",
-                duration_minutes=5,
-                priority="high",
-                category="meds",
-                fixed_time="08:00",
-                frequency="daily",
-            ),
-            Task(
-                "Morning walk",
-                duration_minutes=30,
-                priority="high",
-                category="walk",
-                preferred_time="morning",
-            ),
-            Task(
-                "Grooming",
-                duration_minutes=45,
-                priority="low",
-                category="grooming",
-                frequency="weekly",
-            ),
-            # Already done before the planner ran.
-            Task(
-                "Evening walk",
-                duration_minutes=30,
-                priority="medium",
-                category="walk",
-                completed=True,
-            ),
-        ],
     )
+    mochi = Pet(name="Mochi", species="cat", breed="Tabby", energy_level="medium")
 
-    mochi = Pet(
-        name="Mochi",
-        species="cat",
-        breed="Tabby",
-        energy_level="medium",
-        tasks=[
-            # Anchored: breakfast is the first thing that happens.
-            Task(
-                "Feeding",
-                duration_minutes=10,
-                priority="high",
-                category="feeding",
-                fixed_time="07:30",
-            ),
-            Task(
-                "Litter box",
-                duration_minutes=10,
-                priority="medium",
-                category="other",
-            ),
-            # Anchored: the evening play session is a standing appointment.
-            Task(
-                "Play session",
-                duration_minutes=20,
-                priority="medium",
-                category="enrichment",
-                fixed_time="18:00",
-                preferred_time="evening",
-            ),
-        ],
+    # Added deliberately out of order: 18:00 before 07:30, evening before
+    # morning. Nothing here is sorted by hand.
+    mochi.add_task(
+        Task(
+            "Play session",
+            duration_minutes=20,
+            priority="medium",
+            category="enrichment",
+            fixed_time="18:00",
+            preferred_time="evening",
+        )
+    )
+    biscuit.add_task(
+        Task(
+            "Grooming",
+            duration_minutes=45,
+            priority="low",
+            category="grooming",
+            frequency="weekly",
+        )
+    )
+    biscuit.add_task(
+        Task(
+            "Heartworm meds",
+            duration_minutes=5,
+            priority="high",
+            category="meds",
+            fixed_time="08:00",
+            frequency="daily",
+        )
+    )
+    mochi.add_task(
+        Task("Litter box", duration_minutes=10, priority="medium", category="other")
+    )
+    biscuit.add_task(
+        Task(
+            "Morning walk",
+            duration_minutes=30,
+            priority="high",
+            category="walk",
+            preferred_time="morning",
+        )
+    )
+    mochi.add_task(
+        Task(
+            "Feeding",
+            duration_minutes=10,
+            priority="high",
+            category="feeding",
+            fixed_time="07:30",
+        )
+    )
+    # CLASH ON PURPOSE: Biscuit's breakfast is pinned to 07:35, which lands in
+    # the middle of Mochi's 07:30-07:40 feeding. One owner cannot be in two
+    # places, so the scheduler should warn rather than silently double-book.
+    biscuit.add_task(
+        Task(
+            "Breakfast",
+            duration_minutes=10,
+            priority="medium",
+            category="feeding",
+            fixed_time="07:35",
+        )
     )
 
     return Owner(
@@ -99,10 +102,12 @@ def build_demo_owner():
 
 
 def rule(char="="):
+    """Print a horizontal divider across the report width."""
     print(char * WIDTH)
 
 
 def print_header(owner):
+    """Print the owner, budget, pets and how much work is outstanding."""
     rule()
     print("  PawPal+ - Today's Schedule".center(WIDTH).rstrip())
     rule()
@@ -117,6 +122,7 @@ def print_header(owner):
 
 
 def print_plan(scheduler):
+    """Print the finished schedule as a time-ordered table."""
     rule("-")
     print(f"  {'TIME':<7}{'PET':<10}{'TASK':<24}{'MINS':>5}  {'PRIORITY':<8}")
     rule("-")
@@ -143,6 +149,7 @@ def print_plan(scheduler):
 
 
 def print_skipped(scheduler):
+    """Print everything that did not make the plan, with its reason."""
     if not scheduler.skipped:
         return
     print()
@@ -154,6 +161,7 @@ def print_skipped(scheduler):
 
 
 def print_per_pet(scheduler):
+    """Break the single shared timeline back down by animal."""
     print()
     print("  BY PET")
     rule("-")
@@ -170,6 +178,7 @@ def print_per_pet(scheduler):
 
 
 def print_reasoning(scheduler):
+    """Print the scheduler's own account of why it chose this plan."""
     print()
     print("  WHY THIS PLAN")
     rule("-")
@@ -177,7 +186,80 @@ def print_reasoning(scheduler):
         print(f"  {line}")
 
 
+def print_entry_order(owner):
+    """Show the order tasks were typed in, next to clock order."""
+    print()
+    print("  AS ENTERED (deliberately out of order)")
+    rule("-")
+    for pet, task in owner.all_tasks():
+        when = task.fixed_time or "flexible"
+        print(f"  {when:<9} {pet.name:<9} {task.description}")
+
+
+def print_time_order(scheduler):
+    """Scheduler.sort_by_time() puts the same tasks on a clock."""
+    print()
+    print("  SORTED BY TIME  (Scheduler.sort_by_time)")
+    rule("-")
+    for pet, task in scheduler.sort_by_time():
+        when = task.fixed_time or "flexible"
+        print(f"  {when:<9} {pet.name:<9} {task.description}")
+
+
+def print_conflicts(scheduler):
+    """Conflict detection warns; it never raises."""
+    print()
+    print("  CONFLICT CHECK  (Scheduler.conflict_warnings)")
+    rule("-")
+    warnings = scheduler.conflict_warnings()
+    if not warnings:
+        print("  No clashes: nothing is double-booked.")
+        return
+    for warning in warnings:
+        print(f"  {warning}")
+    print(f"  ({len(warnings)} warning(s) — the program keeps running.)")
+
+
+def print_filters(scheduler):
+    """Filtering by pet name and by completion status."""
+    print()
+    print("  FILTERS  (Scheduler.filter_tasks)")
+    rule("-")
+    for pet in scheduler.owner.pets:
+        names = [t.description for _, t in scheduler.filter_tasks(pet=pet.name)]
+        print(f"  pet={pet.name:<9} {', '.join(names)}")
+    for status in ("pending", "done"):
+        names = [t.description for _, t in scheduler.filter_tasks(status=status)]
+        print(f"  status={status:<6} {', '.join(names) if names else '(none)'}")
+
+
+def print_recurrence(owner, scheduler):
+    """Completing a repeating task queues a brand new instance for next time."""
+    print()
+    print("  RECURRENCE  (Pet.complete_task)")
+    rule("-")
+    mochi = owner.get_pet("Mochi")
+    before = len(mochi.tasks)
+    successor = mochi.complete_task("Feeding", on=scheduler.plan_date)
+    print(f"  Ticked off 'Feeding' for Mochi on {scheduler.plan_date:%a %d %b}.")
+    print(f"  Mochi's task count: {before} -> {len(mochi.tasks)}")
+    print(
+        f"  New instance queued: '{successor.description}' "
+        f"({successor.repeat_text()}) due {successor.due_date:%a %d %b}, "
+        f"completed={successor.completed}"
+    )
+
+    tomorrow = scheduler.plan_date.replace() + (successor.due_date - scheduler.plan_date)
+    scheduler.build_plan(on_date=tomorrow)
+    feedings = [s for s in scheduler.scheduled if s["description"] == "Feeding"]
+    print(
+        f"  Plan for {tomorrow:%a %d %b} contains {len(feedings)} 'Feeding' "
+        f"(the successor, not a duplicate)."
+    )
+
+
 def main():
+    """Build the demo owner, plan the day, and print every section."""
     # The schedule uses a few non-ASCII characters; make sure they survive
     # being piped to a file or a narrow Windows console.
     try:
@@ -190,10 +272,19 @@ def main():
     scheduler.build_plan()
 
     print_header(owner)
+    print_entry_order(owner)
+    print_time_order(scheduler)
+    print_conflicts(scheduler)
+    print()
+    print("  TODAY'S SCHEDULE")
     print_plan(scheduler)
     print_skipped(scheduler)
     print_per_pet(scheduler)
+    print_filters(scheduler)
     print_reasoning(scheduler)
+    # Last, because completing a task mutates the owner: it retires Mochi's
+    # feeding and queues tomorrow's, which would change everything above.
+    print_recurrence(owner, scheduler)
     rule()
 
 

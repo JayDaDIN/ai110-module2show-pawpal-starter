@@ -84,19 +84,28 @@ owner.set_available_minutes(
     )
 )
 
-day_start_input = st.sidebar.text_input("Start the day at (HH:MM)", value=owner.day_start)
+scol1, scol2 = st.sidebar.columns(2)
+with scol1:
+    day_start_input = st.text_input("Day starts (HH:MM)", value=owner.day_start)
+with scol2:
+    day_end_input = st.text_input("Day ends (HH:MM)", value=owner.day_end)
 try:
     owner.set_day_start(day_start_input)
+    owner.set_day_end(day_end_input)
 except ValueError:
-    st.sidebar.error("Start time must look like HH:MM, e.g. 07:30.")
+    st.sidebar.error("Times must look like HH:MM, e.g. 07:30.")
 
-owner.preferred_times = st.sidebar.multiselect(
-    "Preferred windows",
-    ["morning", "afternoon", "evening"],
-    default=owner.preferred_times,
+# Setters rather than plain assignment: Owner counts a real change so the plan
+# below knows when it has gone stale.
+owner.set_preferred_times(
+    st.sidebar.multiselect(
+        "Preferred windows",
+        ["morning", "afternoon", "evening"],
+        default=owner.preferred_times,
+    )
 )
-owner.skip_low_priority = st.sidebar.checkbox(
-    "Skip low-priority tasks today", value=owner.skip_low_priority
+owner.set_skip_low_priority(
+    st.sidebar.checkbox("Skip low-priority tasks today", value=owner.skip_low_priority)
 )
 
 st.sidebar.divider()
@@ -104,6 +113,16 @@ st.sidebar.metric("Pending work", f"{owner.pending_minutes()} min")
 if owner.is_overcommitted():
     over = owner.pending_minutes() - owner.available_minutes
     st.sidebar.warning(f"{over} min more than the day allows.")
+
+clashes = owner.all_conflicts()
+if clashes:
+    st.sidebar.error(
+        f"{len(clashes)} fixed-time clash(es):\n\n"
+        + "\n".join(
+            f"- {a.description} ({pa.name}) vs {b.description} ({pb.name})"
+            for pa, a, pb, b in clashes
+        )
+    )
 
 
 # --- Pets: Owner.add_pet() / Owner.remove_pet() ------------------------------
@@ -157,7 +176,7 @@ if owner.pets:
     with rcol2:
         st.write("")
         if st.button("Remove pet"):
-            owner.remove_pet(to_remove)  # tasks go with the pet
+            owner.remove_pet(to_remove)  # tasks go with the pet, and touches owner
             st.session_state.scheduler = None
             st.rerun()
 else:
@@ -198,56 +217,106 @@ else:
                 ["walk", "feeding", "meds", "enrichment", "grooming", "other"],
             )
         with col6:
-            frequency = st.selectbox("Frequency", ["daily", "weekly"])
+            repeat_label = st.selectbox("Repeats", ["daily", "weekly", "every N days"])
 
-        col7, col8 = st.columns(2)
+        col7, col8, col9 = st.columns(3)
         with col7:
             preferred_time = st.selectbox(
                 "Preferred window", ["any", "morning", "afternoon", "evening"]
             )
         with col8:
             fixed_time = st.text_input("Fixed time (HH:MM, optional)", value="")
+        with col9:
+            every_n_days = st.number_input(
+                "N (for every N days)", min_value=1, max_value=365, value=3
+            )
 
         if st.form_submit_button("Add task"):
             try:
                 # Task.__post_init__ validates, so a bad fixed time is caught
                 # here and now rather than when the plan is generated.
+                custom = repeat_label == "every N days"
                 new_task = Task(
                     description=description,
                     duration_minutes=int(duration),
                     priority=priority,
                     category=category,
                     preferred_time=preferred_time,
-                    frequency=frequency,
+                    frequency="custom" if custom else repeat_label,
+                    interval_days=int(every_n_days) if custom else None,
                     fixed_time=fixed_time.strip() or None,
                 )
+                # Ask about clashes before the task joins the list, so the
+                # answer is "this collides with X" rather than "with itself".
+                clashes = owner.conflicts_with(new_task)
                 owner.get_pet(task_pet_name).add_task(new_task)
+                owner.touch()
+                if clashes:
+                    st.warning(
+                        "Added, but its fixed time overlaps "
+                        + ", ".join(
+                            f"{t.description} ({p.name}) at {t.fixed_time}"
+                            for p, t in clashes
+                        )
+                        + ". The lower-priority one will be skipped."
+                    )
             except (ValueError, TypeError) as err:
                 st.error(f"Could not add that task: {err}")
 
     if owner.all_tasks():
         st.caption("Tick a task off once it's done and it drops out of the plan.")
-        for pet in owner.pets:
-            if not pet.tasks:
-                continue
-            st.markdown(f"**{pet.name}**")
-            for i, task in enumerate(pet.tasks):
-                tcol1, tcol2 = st.columns([6, 1])
-                with tcol1:
-                    pin = f" @ {task.fixed_time}" if task.is_anchored() else ""
-                    done = st.checkbox(
-                        f"{task.description} — {task.duration_minutes} min, "
-                        f"{task.priority} priority{pin}",
-                        value=task.completed,
-                        key=f"{pet.name}_{i}_{task.description}",
-                    )
-                    # Call the real methods rather than assigning the field.
+
+        # --- filters: one Owner.filter_tasks() call drives the whole list ----
+        fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+        with fcol1:
+            pet_filter = st.selectbox("Pet", ["all"] + [p.name for p in owner.pets])
+        with fcol2:
+            status_filter = st.selectbox("Status", ["all", "pending", "done"])
+        with fcol3:
+            category_filter = st.selectbox("Category", ["all"] + owner.categories())
+        with fcol4:
+            order = st.selectbox("Order", ["by time", "by priority"])
+
+        pairs = owner.filter_tasks(
+            pet=None if pet_filter == "all" else pet_filter,
+            status=None if status_filter == "all" else status_filter,
+            category=None if category_filter == "all" else category_filter,
+            by_time=(order == "by time"),
+        )
+        if order == "by priority":
+            pairs.sort(key=lambda pair: pair[1].sort_key())
+
+        if not pairs:
+            st.info("No tasks match those filters.")
+
+        for pet, task in pairs:
+            # The row's own position, so Delete removes the task you clicked
+            # even when two tasks share a description.
+            index = pet.tasks.index(task)
+            tcol1, tcol2 = st.columns([6, 1])
+            with tcol1:
+                pin = f" @ {task.fixed_time}" if task.is_anchored() else ""
+                repeats = (
+                    "" if task.repeat_text() == "daily" else f", {task.repeat_text()}"
+                )
+                done = st.checkbox(
+                    f"{task.description} — {pet.name} — {task.duration_minutes} min, "
+                    f"{task.priority} priority{pin}{repeats}",
+                    value=task.completed,
+                    key=f"done_{pet.name}_{index}",
+                )
+                # Only act on a real change: Streamlit replays this on every
+                # rerun, and mark_incomplete() would otherwise wipe the
+                # completion date that recurrence is built on.
+                if done != task.completed:
                     task.mark_complete() if done else task.mark_incomplete()
-                with tcol2:
-                    if st.button("Delete", key=f"del_{pet.name}_{i}_{task.description}"):
-                        pet.remove_task(task.description)
-                        st.session_state.scheduler = None
-                        st.rerun()
+                    owner.touch()
+            with tcol2:
+                if st.button("Delete", key=f"del_{pet.name}_{index}"):
+                    pet.remove_task_at(index)
+                    owner.touch()
+                    st.session_state.scheduler = None
+                    st.rerun()
     else:
         st.info("No tasks yet.")
 
@@ -271,6 +340,11 @@ with pcol2:
 scheduler = st.session_state.scheduler
 
 if scheduler is not None:
+    # Owner.version changes whenever a constraint, pet or task does, so a plan
+    # on screen can say it is out of date instead of quietly misleading you.
+    if scheduler.is_stale():
+        st.info("Something changed since this plan was built — generate it again.")
+
     plan = scheduler.scheduled
 
     if plan:
@@ -287,6 +361,7 @@ if scheduler is not None:
                     "Task": slot["description"],
                     "Minutes": slot["duration_minutes"],
                     "Priority": slot["priority"],
+                    "Repeats": slot["repeats"],
                     "Pinned": "yes" if slot["anchored"] else "",
                 }
                 for slot in plan

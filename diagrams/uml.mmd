@@ -2,8 +2,11 @@ classDiagram
     %% PawPal+ — four classes, one per core action of the system.
     %% Task tracks work, Owner manages pets and constraints, Scheduler plans.
     %% All four are Python @dataclass types, defined in pawpal_system.py.
-    %% On Scheduler, `scheduled`, `skipped` and `planned` are results of
-    %% build_plan(), not constructor parameters (field(init=False)).
+    %% On Scheduler, `scheduled`, `skipped`, `planned`, `plan_date` and
+    %% `built_at_version` are results of build_plan(), not constructor
+    %% parameters (field(init=False)). The same is true of Owner.version.
+    %% Recurrence is a gap in days: `interval_days` plus `last_completed`
+    %% decide whether a task is due, so `frequency` is only a preset for it.
 
     class Task {
         +str description
@@ -13,13 +16,29 @@ classDiagram
         +str fixed_time
         +str preferred_time
         +str frequency
+        +int interval_days
         +bool completed
+        +date last_completed
+        +date due_date
+        +bool retired
+        -int _start
         +priority_score() int
         +sort_key() tuple
+        +time_sort_key() tuple
+        +set_fixed_time(value) str
         +is_anchored() bool
         +start_minutes() int
-        +mark_complete() Task
+        +end_minutes() int
+        +overlaps(other) bool
+        +window() tuple
+        +mark_complete(on) Task
         +mark_incomplete() Task
+        +refresh_for(day) Task
+        +is_due_on(day) bool
+        +next_due_on() date
+        +next_occurrence(on) Task
+        +repeat_text() str
+        +matches(status, category, priority, anchored) bool
     }
 
     class Pet {
@@ -29,36 +48,54 @@ classDiagram
         +str energy_level
         +list~Task~ tasks
         +add_task(task) Task
+        +complete_task(task, on) Task
         +remove_task(description) bool
+        +remove_task_at(index) Task
+        +filter_tasks(**filters) list~Task~
+        +tasks_by_time() list~Task~
         +tasks_by_category(category) list~Task~
         +pending_tasks() list~Task~
         +completed_tasks() list~Task~
         +total_task_minutes() int
         +pending_minutes() int
+        +anchor_conflicts() list~tuple~
     }
 
     class Owner {
         +str name
         +int available_minutes
         +str day_start
+        +str day_end
         +list~str~ preferred_times
         +bool skip_low_priority
         +list~Pet~ pets
+        +int version
+        +touch() int
         +rename(name) str
         +set_available_minutes(minutes) int
         +set_day_start(value) str
+        +set_day_end(value) str
+        +set_preferred_times(windows) list~str~
+        +set_skip_low_priority(skip) bool
+        +day_bounds() tuple
         +add_pet(pet) Pet
         +remove_pet(name) bool
         +get_pet(name) Pet
         +all_tasks() list~tuple~
+        +filter_tasks(pet, by_time, **filters) list~tuple~
         +pending_tasks() list~tuple~
         +completed_tasks() list~tuple~
         +total_task_minutes() int
         +pending_minutes() int
+        +categories() list~str~
         +has_capacity_for(minutes_used, task) bool
         +minutes_remaining(minutes_used) int
         +prefers(task) bool
         +is_overcommitted() bool
+        +conflicts_with(task, ignoring) list~tuple~
+        +all_conflicts() list~tuple~
+        -_set(attribute, value) any
+        -_index() dict
     }
 
     class Scheduler {
@@ -66,15 +103,25 @@ classDiagram
         +list~dict~ scheduled
         +list~dict~ skipped
         +bool planned
-        +build_plan() list~dict~
+        +date plan_date
+        +int built_at_version
+        +build_plan(on_date) list~dict~
+        +is_stale() bool
+        +sort_by_time(tasks) list~tuple~
+        +filter_tasks(pet, by_time, filters) list~tuple~
+        +find_conflicts() list~tuple~
+        +has_conflicts() bool
+        +conflict_warnings() list~str~
         +explain() list~str~
         +total_scheduled_minutes() int
         +tasks_for(pet_name) list~dict~
+        +skipped_for(pet_name) list~dict~
         -_gather() tuple
         -_place_anchored(anchored) tuple
         -_place_flexible(flexible, placements, used) list
         -_build_gaps(placements) list
-        -_first_gap_that_fits(gaps, duration) tuple
+        -_best_slot(gaps, task) tuple
+        -_claim(gaps, index, start, duration) None
         -_reason_for(task) str
     }
 

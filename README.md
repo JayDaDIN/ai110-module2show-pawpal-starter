@@ -49,7 +49,7 @@ pip install -r requirements.txt
 | `pawpal_system.py` | The logic layer: `Task`, `Pet`, `Owner`, `Scheduler`. No UI code. |
 | `main.py` | Command-line demo — two pets, mixed fixed and flexible tasks, prints today's schedule. |
 | `app.py` | The Streamlit UI. Imports from `pawpal_system`, holds no scheduling logic. |
-| `tests/` | `test_models.py` (data classes) and `test_scheduler.py` (the planning brain). |
+| `tests/` | `test_models.py` (data classes), `test_scheduler.py` (the planning brain) and `test_features.py` (time ordering, filtering, recurrence, conflicts). |
 | `diagrams/uml.mmd` | Class diagram, kept in sync with the code. |
 
 ## 🖥️ Sample Output
@@ -142,17 +142,110 @@ the explanation output.
 
 ## 📐 Smarter Scheduling
 
+Four features beyond basic ordering. Each is described below with the method that implements it;
+run `python main.py` to see all four printed in one pass.
+
+### 1. Sorting — `Scheduler.sort_by_time()`
+
+Tasks can be added in any order. `sort_by_time()` returns them on a clock: pinned tasks first in
+chronological order, then flexible ones in the order the planner would pick them up (their time
+is not settled until a plan is built).
+
+| Method | Role |
+|---|---|
+| `Scheduler.sort_by_time(tasks=None)` | Entry point. Defaults to every task across every pet; also accepts a filtered list of `(pet, task)` pairs. |
+| `Task.time_sort_key()` | The ordering rule: pinned by start minute, flexible after. |
+| `Task.sort_key()` | The *importance* ordering the planner uses: priority, then shortest duration, then description. The description tie-break keeps plans deterministic and testable. |
+| `Pet.tasks_by_time()` | The same ordering for one pet. |
+
+`main.py` prints "AS ENTERED" directly above "SORTED BY TIME" so the sort is visibly doing work:
+
+```
+AS ENTERED (deliberately out of order)     SORTED BY TIME
+  18:00     Mochi     Play session           07:30     Mochi     Feeding
+  flexible  Mochi     Litter box             07:35     Biscuit   Breakfast
+  07:30     Mochi     Feeding                08:00     Biscuit   Heartworm meds
+  flexible  Biscuit   Grooming               18:00     Mochi     Play session
+  08:00     Biscuit   Heartworm meds         flexible  Biscuit   Morning walk
+  flexible  Biscuit   Morning walk           flexible  Mochi     Litter box
+  07:35     Biscuit   Breakfast              flexible  Biscuit   Grooming
+```
+
+### 2. Filtering — `Scheduler.filter_tasks()`
+
+Narrow the task list by **pet name**, **completion status**, category, priority, or whether a task
+is pinned. Filters combine, and `by_time=True` sorts the result.
+
+| Method | Role |
+|---|---|
+| `Scheduler.filter_tasks(pet=…, by_time=…, **filters)` | Scheduler-level entry point. |
+| `Owner.filter_tasks(pet=…, by_time=…, **filters)` | Across every pet, returning `(pet, task)` pairs. |
+| `Pet.filter_tasks(**filters)` | Within one pet. |
+| `Task.matches(status, category, priority, anchored)` | The single predicate all three share, so a new filter is added once rather than in five list comprehensions. |
+| `Pet.pending_tasks()` / `completed_tasks()` | Shorthand for the common status split. |
+
+```python
+scheduler.filter_tasks(pet="Mochi")                              # one pet
+scheduler.filter_tasks(status="done")                            # completion status
+scheduler.filter_tasks(pet="Mochi", status="pending", by_time=True)   # combined
+```
+
+### 3. Conflict detection — `Scheduler.conflict_warnings()`
+
+Two tasks pinned to overlapping times return a **warning string rather than raising**. The program
+keeps running and the plan still builds; the weaker claim is skipped with a reason.
+
+| Method | Role |
+|---|---|
+| `Scheduler.conflict_warnings()` | A list of plain-language warnings. Empty list means a clean day. |
+| `Scheduler.has_conflicts()` / `find_conflicts()` | Boolean check, and the raw `(pet, task, pet, task)` pairs. |
+| `Task.overlaps(other)` | Compares full half-open intervals `[start, start + duration)`, so partial overlaps are caught, not just identical start times. Touching end-to-end is not a clash. |
+| `Owner.all_conflicts(on=None)` | Every colliding pair, ignoring completed, retired and not-yet-due tasks. |
+| `Owner.conflicts_with(task)` | Checks one task as it is added, so the UI warns at the keyboard. |
+| `Scheduler._place_anchored()` | Resolves the clash: the **higher-priority** pin keeps the slot; on equal priority the earlier one wins. |
+
+```
+WARNING: Mochi and Biscuit are both booked at 07:30 — Feeding (10 min, runs to
+07:40) overlaps Breakfast at 07:35. Only the stronger claim will be scheduled.
+```
+
+Warnings also appear at the top of `Scheduler.explain()`, which is where they explain why a pinned
+task the owner expected is missing from the plan.
+
+### 4. Recurring tasks — `Pet.complete_task()`
+
+Completing a `daily` or `weekly` task **creates a brand new `Task` instance** for the next
+occurrence. The finished one is retired as a record that the work was done.
+
+| Method | Role |
+|---|---|
+| `Pet.complete_task(task, on=None)` | Marks the task done, retires it, and appends its successor. Returns the new `Task`. |
+| `Task.next_occurrence(on=None)` | Builds the successor, copying every setting and stamping a `due_date` of `completion + interval_days`. |
+| `Task.is_due_on(day)` | Keeps the successor out of today's plan and lets it in on its due date. |
+| `Task.refresh_for(day)` | Rolls an ordinary tick over at midnight; skips retired tasks so a successor is never duplicated. |
+| `Task.repeat_text()` | "daily" / "weekly" / "every N days" for the UI. |
+
+```python
+successor = mochi.complete_task("Feeding", on=date(2026, 10, 6))
+successor.due_date      # 2026-10-07
+successor.completed     # False
+```
+
+`frequency` accepts `daily`, `weekly`, or `custom` with an explicit `interval_days`, so "every
+third day" needs no new keyword.
+
+### Everything else
+
 | Feature | Method(s) | Notes |
 |---------|-----------|-------|
-| Task sorting | `Task.priority_score()`, `Task.sort_key()` | Highest priority first, then shortest duration, then description. The description tie-break makes the plan deterministic and testable. |
-| Fixed-time anchoring | `Task.is_anchored()`, `Scheduler._place_anchored()` | Tasks with a `fixed_time` are pinned there first, before anything flexible is placed. |
-| Gap filling | `Scheduler._build_gaps()`, `_first_gap_that_fits()` | Flexible tasks are fitted into the free stretches between anchors — a 10-min task will take a 20-min gap that a 60-min task cannot use. |
-| Conflict handling | `Scheduler._place_anchored()` | Two anchors that overlap: the earlier one wins, the later is skipped with a reason. Flexible tasks can never overlap, since they only go in gaps. |
-| Filtering | `Owner.has_capacity_for()`, `Owner.skip_low_priority` | A task that doesn't fit is skipped with a reason, and the loop **continues** — a shorter task later in the list can still fit. The owner can also drop all low-priority tasks outright. |
+| Fixed-time anchoring | `Task.is_anchored()`, `Scheduler._place_anchored()` | Pinned tasks claim their exact times before anything flexible is placed. |
+| Gap filling | `Scheduler._build_gaps()`, `_best_slot()`, `_claim()` | Flexible tasks fit into the free stretches between anchors — a 10-min task takes a 20-min gap a 60-min task cannot use. Placing a task mid-gap splits it in two. |
+| Preferred windows | `Task.window()`, `Scheduler._best_slot()` | A task is placed inside its own window when it fits there, and anywhere it fits otherwise. |
+| Budget | `Owner.has_capacity_for()`, `Owner.skip_low_priority` | A task that doesn't fit is skipped with a reason and the loop **continues**, so a shorter task later can still fit. |
 | Across pets | `Owner.all_tasks()`, `Owner.pending_tasks()` | All pets share one time budget, so a high-priority task for one pet can beat a low-priority one for another. |
-| Completion status | `Task.completed`, `Task.mark_complete()` | Completed tasks are left out of planning entirely and never consume budget. |
-| Recurring tasks | `Task.frequency` | Stored (`daily` / `weekly`) but not yet acted on — the planner builds a single day. This is the clearest next feature. |
-| Explanation | `Scheduler.explain()`, `Scheduler._reason_for()` | Returns the strategy, a reason per scheduled task, and a reason per skipped task. |
+| Day bounds | `Owner.set_day_end()`, `Owner.day_bounds()` | Nothing is scheduled past the end of the day. |
+| Stale plans | `Scheduler.is_stale()`, `Owner.version` | The UI knows when the owner changed after a plan was built. |
+| Explanation | `Scheduler.explain()`, `_reason_for()` | The strategy, any conflict warnings, a reason per scheduled task, and a reason per skipped task. |
 
 ## 📸 Demo Walkthrough
 
