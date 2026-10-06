@@ -65,6 +65,12 @@ if "scheduler" not in st.session_state:
 
 owner = st.session_state.owner
 
+# A plan-less Scheduler used purely for display. Sorting, filtering and conflict
+# detection are all Scheduler methods that read the owner without building a
+# plan, so the UI asks this object its questions rather than reimplementing any
+# of that logic here. The one in session_state stays reserved for the plan.
+view = Scheduler(owner)
+
 # Roll yesterday's ticks off, so a daily task's checkbox is clear again today.
 # The scheduler deliberately will not do this — building a plan for a date only
 # reads the tasks — so the day change is the UI's to apply.
@@ -121,16 +127,13 @@ st.sidebar.metric("Pending work", f"{owner.pending_minutes()} min")
 if owner.is_overcommitted():
     over = owner.pending_minutes() - owner.available_minutes
     st.sidebar.warning(f"{over} min more than the day allows.")
+else:
+    st.sidebar.success("Everything pending fits in today's budget.")
 
-clashes = owner.all_conflicts()
-if clashes:
-    st.sidebar.error(
-        f"{len(clashes)} fixed-time clash(es):\n\n"
-        + "\n".join(
-            f"- {a.description} ({pa.name}) vs {b.description} ({pb.name})"
-            for pa, a, pb, b in clashes
-        )
-    )
+# Scheduler.conflict_warnings() already phrases each clash in plain language,
+# so the sidebar prints what it returns instead of formatting pairs itself.
+for warning in view.conflict_warnings():
+    st.sidebar.warning(warning)
 
 
 # --- Pets: Owner.add_pet() / Owner.remove_pet() ------------------------------
@@ -285,17 +288,44 @@ else:
         with fcol4:
             order = st.selectbox("Order", ["by time", "by priority"])
 
-        pairs = owner.filter_tasks(
+        # Scheduler.filter_tasks() narrows the list; Scheduler.sort_by_time()
+        # puts the result on the clock. Both are the same methods the planner
+        # and the tests use, so the screen can never drift from the logic.
+        pairs = view.filter_tasks(
             pet=None if pet_filter == "all" else pet_filter,
             status=None if status_filter == "all" else status_filter,
             category=None if category_filter == "all" else category_filter,
-            by_time=(order == "by time"),
         )
-        if order == "by priority":
-            pairs.sort(key=lambda pair: pair[1].sort_key())
+        if order == "by time":
+            pairs = view.sort_by_time(pairs)
+        else:
+            pairs = sorted(pairs, key=lambda pair: pair[1].sort_key())
 
         if not pairs:
             st.info("No tasks match those filters.")
+        else:
+            st.success(
+                f"Showing {len(pairs)} of {len(owner.all_tasks())} task(s), "
+                f"{sum(t.duration_minutes for _, t in pairs)} min total, {order}."
+            )
+            st.table(
+                [
+                    {
+                        "Time": task.fixed_time if task.is_anchored() else "flexible",
+                        "Pet": pet.name,
+                        "Task": task.description,
+                        "Minutes": task.duration_minutes,
+                        "Priority": task.priority,
+                        "Category": task.category,
+                        "Repeats": task.repeat_text(),
+                        "Status": "done" if task.completed else "pending",
+                    }
+                    for pet, task in pairs
+                ]
+            )
+
+        if pairs:
+            st.caption("Mark done or delete:")
 
         for pet, task in pairs:
             # The row's own position, so Delete removes the task you clicked
@@ -353,6 +383,10 @@ if scheduler is not None:
     if scheduler.is_stale():
         st.info("Something changed since this plan was built — generate it again.")
 
+    # Why a pinned task the owner expected may be missing from the table below.
+    for warning in scheduler.conflict_warnings():
+        st.warning(warning)
+
     plan = scheduler.scheduled
 
     if plan:
@@ -392,8 +426,20 @@ if scheduler is not None:
             slots = scheduler.tasks_for(pet.name)
             minutes = sum(s["duration_minutes"] for s in slots)
             st.markdown(f"**{pet.name}** — {len(slots)} task(s), {minutes} min")
-            for slot in slots:
-                st.text(f"  {slot['start_time']}  {slot['description']}")
+            if slots:
+                st.table(
+                    [
+                        {
+                            "Time": slot["start_time"],
+                            "Task": slot["description"],
+                            "Minutes": slot["duration_minutes"],
+                            "Priority": slot["priority"],
+                        }
+                        for slot in slots
+                    ]
+                )
+            else:
+                st.caption("Nothing scheduled for this pet today.")
 
     with st.expander("Why this plan?", expanded=True):
         for line in scheduler.explain():

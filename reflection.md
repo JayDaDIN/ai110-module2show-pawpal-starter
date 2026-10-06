@@ -270,12 +270,18 @@ archiving off the pet.
 **a. How you used AI**
 
 - How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
-- What kinds of prompts or questions were most helpful?
 
+I used AI throughout the planning, implementation, and testing phase. The first instance was by initally using plan mode to brainstorm and flush out the most effecient method to create the PawPal app. Thereafter, I set preliminary guidelines for AI to have to ensure although I was gaining assistance, everything must be validated through me before implementing any soft or hard changes.
+- What kinds of prompts or questions were most helpful?
+The most effective prompts came from straight forward and non-redundant prompts. For example, instead of asking Claude to do something and then check it multiple times after, I implemented checkers to ensure that Claude can simply go back and validate any major (or minor) changes. So straightforward and simple prompts helped save me tokens and reduce redundancy.
 **b. Judgment and verification**
 
 - Describe one moment where you did not accept an AI suggestion as-is.
+AI attempted to reword and change classes based on what it thought was more effecient. I declined because it wasn't according to the CodePath prompt.
+
 - How did you evaluate or verify what the AI suggested?
+
+I like to look at the code and AI's thought process, more so of Claude's thought process. In this, I'm able to see the direction where Claude is headed and determine if it's beneficial to implement or redirect Claude in a prompt-guided direction.
 
 ---
 
@@ -283,7 +289,7 @@ archiving off the pet.
 
 **a. What you tested**
 
-57 tests across two files.
+139 tests across five files, run with `python -m pytest`.
 
 `tests/test_models.py` — the data layer: priority score mapping, sort ordering (including the
 description tie-break), anchoring (`is_anchored()` / `start_minutes()`), completion toggling,
@@ -313,14 +319,50 @@ or frequency, malformed `fixed_time` and `day_start`, empty description).
 That last one matters most: "explain why it chose that plan" is a core requirement, so it needs a
 test guarding it, not just a method that happens to exist.
 
+`tests/test_features.py` — the four features added after the core planner: time ordering,
+combined filtering, recurrence, and conflict warnings. These are the tests that pin the *contracts*
+the UI relies on — that `filter_tasks()` combines filters rather than taking the last one, that
+`conflict_warnings()` returns strings instead of raising, that `sort_by_time()` puts flexible tasks
+after pinned ones instead of guessing a time for them.
+
+`tests/test_edge_cases.py` — the awkward inputs, written by asking "what would make this produce a
+confident wrong answer?" rather than "what else can I call?":
+
+- A plan reads in chronological order, including across pets
+- Sorting identical tasks is *stable*, so the display never flickers between reruns
+- Completing a daily task creates exactly one successor, due tomorrow and absent from today
+- The successor keeps every setting of the task it replaces, and a daily task chains day after day
+- Completing the same task twice does not queue two successors
+- Two tasks pinned to the same minute, a partial overlap, and a clash across two pets are all
+  flagged; only one of the two is scheduled
+- Identical times on *different days* are not a conflict
+- A clean day reports no conflicts at all — the negative case, so the detector can't pass by
+  returning a warning for everything
+- A day that starts and ends at the same time has no room
+- An unrecognised status filter is rejected rather than silently matching nothing
+
+`tests/test_pawpal.py` — the starter smoke tests, kept so the package import and basic construction
+stay covered.
+
 The anchor tests were the ones that caught real bugs. The end-to-end case in particular — two
 anchors where one ends exactly when the next begins — is an off-by-one trap: using `<=` instead of
 `<` in the overlap check would wrongly reject a perfectly valid back-to-back pair.
 
 **b. Confidence**
 
-Reasonably confident in the scheduling logic — the budget, ordering, anchoring and skip behaviors
-are all directly asserted, and the sort is deterministic so the tests aren't flaky.
+**4 out of 5.** All 139 pass in well under a second, and they cover the behaviors the product is
+actually judged on: the budget is never exceeded, ordering is deterministic, anchors land exactly,
+clashes are reported rather than thrown, and every skip carries a reason. The sort being total
+means the suite asserts exact output instead of "contains," so a regression in ordering fails
+loudly instead of passing by coincidence. The negative cases matter as much as the positive ones —
+a conflict detector with no clean-day test could be returning warnings for everything and still
+look green.
+
+What holds back the fifth star is scope rather than depth. The suite tests `pawpal_system.py`
+directly; `app.py` has no automated coverage at all and is only exercised by hand, so a Streamlit
+widget wired to the wrong method would not fail a test. Recurrence is verified over a handful of
+chained days, not over a long run, and the task list growing by one per completion has never been
+tested at a size where that matters.
 
 Edge cases I'd test next:
 - A plan that runs past midnight (`_to_clock` wraps, but nothing asserts what *should* happen, and
@@ -328,8 +370,7 @@ Edge cases I'd test next:
 - Duplicate task descriptions on the same pet
 - An anchored task whose fixed time is before `day_start` — currently honored, but is that right?
 - `preferred_times` actually influencing order, if that becomes a hard constraint in v2
-- Recurring tasks — `Task.frequency` is stored but never acted on, so it's currently untested
-  because it's unimplemented
+- A weekly task chained across a month, to confirm due dates don't drift
 
 ---
 
@@ -337,12 +378,65 @@ Edge cases I'd test next:
 
 **a. What went well**
 
-- What part of this project are you most satisfied with?
+The part I am most satisfied with is **`explain()` being a first-class method rather than a pile of
+print statements**. The brief asks the app to say why it chose a plan, and the obvious reading of
+that is "print some commentary while scheduling." Making the reasoning a returned value instead
+changed what the rest of the project could do. The CLI prints it, the Streamlit expander prints the
+same lines, and a test can assert that every scheduled *and* skipped task is accounted for. The
+explanation cannot quietly drift away from the plan, because there is only one of it.
+
+Close behind is the **gap list**. Splitting free time into explicit intervals was written to fix a
+bug — a flexible task placed just before an anchor ran into it — but it produced a behavior I did
+not design: a 10-minute task happily takes a 20-minute hole that a 45-minute task cannot use, so
+small jobs fill the cracks instead of piling up at the end of the day. In the demo the litter box
+lands at 07:40 between two pinned tasks, and nothing in the code asked for that specifically. It is
+the one place where modelling the problem honestly paid off beyond the thing I was fixing.
+
+The third is **keeping `pawpal_system.py` free of UI code**. It was a constraint I nearly broke
+several times, usually when it would have been quicker to format a string where the data lives. Not
+breaking it is why `main.py` and `app.py` can present the same system completely differently, and
+why 139 tests run in 0.17 seconds without Streamlit involved.
 
 **b. What you would improve**
 
-- If you had another iteration, what would you improve or redesign?
+**Unify how a task fails.** Right now a task can miss the plan for two reasons through two separate
+channels: out of budget, which lands in `skipped` with a reason, or a pin clash, which also lands in
+`skipped` but is *additionally* announced by `conflict_warnings()` reading the raw task list rather
+than the finished plan. That means the warnings can describe a clash the plan then resolved, and the
+two paths have to be rendered separately in both front ends. One failure record, produced by the
+planner, consumed everywhere, would delete code in three files.
+
+**Let a losing anchor fall back to flexible.** When two pins collide the weaker one is dropped, even
+when free time sits moments away — Breakfast dies at 07:35 while 07:40 onward is empty. I defended
+that as "a pin is a promise," and I still think dropping beats silently moving. But *asking* would
+be better than either: demote it to the flexible pool, let the gap-filler place it, and say in the
+explanation that it was moved and why. The reason I didn't is structural — the gap list is built
+once between the two passes, so a demoted anchor arrives after the list is final. Fixing it properly
+means making the passes iterate, which is the redesign I would actually spend the next iteration on.
+
+**Test `app.py`.** It is the one file with no automated coverage, and it is the file a grader opens
+first. A handful of tests driving the Streamlit session state would catch the class of bug the
+current suite structurally cannot: a correct backend wired to the wrong button.
+
+**Archive retired tasks.** Recurrence grows the task list by one per completion forever. Invisible
+for a single day, wrong for anything longer-lived.
 
 **c. Key takeaway**
 
-- What is one important thing you learned about designing systems or working with AI on this project?
+**Where you put a decision matters more than how you implement it.** The same scheduling rules, with
+the ranking logic written inline in `Scheduler`, would have been a worse system in a way that has
+nothing to do with the algorithm: the strings `"high"` and `"medium"` would appear in five places,
+changing the ranking would mean changing all five, and the tests would have to go through the
+planner to check an ordering question. Putting `sort_key()` on `Task` meant priority is defined
+once, and the scheduler never names a priority level at all. The same instinct explains the gap
+list, `Task.matches()` as a single shared predicate, and `explain()` returning rather than printing.
+Each one is a choice about *where* something lives, and each one is why the later features were
+small additions instead of rewrites.
+
+The corollary I learned the harder way is that **a rule you can say in one sentence is worth more
+than a rule that is slightly better**. The planner is greedy, so it can leave minutes unfilled that
+an optimal packing would use. I kept it, because "highest priority first, shortest first on ties" is
+something an owner can predict and check, and a knapsack solver's output is correct but impossible
+to defend to someone wondering why their dog's walk got dropped. For a tool whose entire job is to
+be trusted with something you care about, explainable beat optimal — and that was not the tradeoff I
+expected to be making when I started.
