@@ -5,6 +5,8 @@ live Owner object in the Streamlit session cache, and wires each UI control to
 a real method on that object.
 """
 
+from datetime import date
+
 import streamlit as st
 
 # 1) Bring the specific classes we need in from the logic layer.
@@ -62,6 +64,12 @@ if "scheduler" not in st.session_state:
     st.session_state.scheduler = None
 
 owner = st.session_state.owner
+
+# Roll yesterday's ticks off, so a daily task's checkbox is clear again today.
+# The scheduler deliberately will not do this — building a plan for a date only
+# reads the tasks — so the day change is the UI's to apply.
+for _pet, _task in owner.all_tasks():
+    _task.refresh_for(date.today())
 
 
 # --- 3) Sidebar: each widget calls a validated setter on the live Owner -------

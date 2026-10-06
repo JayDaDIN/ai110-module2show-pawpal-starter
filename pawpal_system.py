@@ -162,6 +162,20 @@ class Task:
         """The minute an anchored task finishes, or None when it is flexible."""
         return None if self._start is None else self._start + self.duration_minutes
 
+    def spans(self):
+        """The stretches of the clock this task occupies, as (start, end) pairs.
+
+        Usually one pair. A task that runs past midnight returns two, because
+        23:50 + 30 min covers 23:50-24:00 *and* 00:00-00:20 — and the second
+        half is what collides with an early-morning task.
+        """
+        if self._start is None:
+            return []
+        end = self._start + self.duration_minutes
+        if end <= MINUTES_IN_DAY:
+            return [(self._start, end)]
+        return [(self._start, MINUTES_IN_DAY), (0, end - MINUTES_IN_DAY)]
+
     def overlaps(self, other):
         """Do two anchored tasks collide? Touching end to end does not count.
 
@@ -170,12 +184,15 @@ class Task:
         strict `<` is what makes 08:00+30 and 08:30 adjacent rather than
         clashing; `<=` would reject a perfectly valid back-to-back pair.
         Two flexible tasks never collide, because neither has a time yet.
+
+        Comparing every span against every span is what catches a task that
+        wraps past midnight; without it, 23:50+30 would sort as ending at
+        minute 1460 and never meet a 00:05 task sitting at minute 5.
         """
-        if not (self.is_anchored() and other.is_anchored()):
-            return False
-        return (
-            self._start < other.end_minutes()
-            and other.start_minutes() < self.end_minutes()
+        return any(
+            mine_start < theirs_end and theirs_start < mine_end
+            for mine_start, mine_end in self.spans()
+            for theirs_start, theirs_end in other.spans()
         )
 
     def window(self):
@@ -222,6 +239,21 @@ class Task:
         self.last_completed = None
         return self
 
+    def is_done_for(self, day):
+        """Is this task's tick still standing on `day`?
+
+        A tick belongs to the day it was made: a daily feeding ticked off on
+        Monday is back on the list by Tuesday. Answering this as a question
+        rather than by clearing the flag means building a plan for another day
+        can stay read-only. A retired task keeps its tick whatever the day,
+        because a successor already carries the work forward.
+        """
+        if not self.completed:
+            return False
+        if self.retired or self.last_completed is None:
+            return True
+        return self.last_completed >= day
+
     def refresh_for(self, day):
         """Start a new day: clear a tick that belongs to an earlier one.
 
@@ -229,13 +261,11 @@ class Task:
         off forever. `last_completed` survives, so recurrence still knows when
         the task was last actually done. A retired task keeps its tick, because
         a successor already carries it forward.
+
+        The planner uses the read-only `is_done_for` instead; this is for the
+        UI, which really does want to roll the checkbox over at the day change.
         """
-        if (
-            self.completed
-            and not self.retired
-            and self.last_completed is not None
-            and self.last_completed < day
-        ):
+        if self.completed and not self.is_done_for(day):
             self.completed = False
         return self
 
@@ -290,7 +320,14 @@ class Task:
 
         One predicate, used by Pet.filter_tasks and Owner.filter_tasks, so a
         new filter is added here once rather than in five list comprehensions.
+
+        An unknown `status` raises rather than quietly matching everything: a
+        mistyped filter should not look like a filter that found no matches.
         """
+        if status not in (None, "pending", "done"):
+            raise ValueError(
+                f"status must be 'pending', 'done' or None, got {status!r}"
+            )
         if status == "pending" and self.completed:
             return False
         if status == "done" and not self.completed:
@@ -341,11 +378,21 @@ class Pet:
         Returns the new Task.
         """
         if isinstance(task, str):
-            task = next((t for t in self.tasks if t.description == task), None)
+            # Skip retired copies: once "Feeding" has been ticked off, the live
+            # task under that name is its successor, not the historical record.
+            task = next(
+                (t for t in self.tasks if t.description == task and not t.retired),
+                None,
+            )
             if task is None:
-                raise ValueError("no task with that description")
+                raise ValueError("no pending task with that description")
         if task not in self.tasks:
             raise ValueError(f"{task.description!r} does not belong to {self.name}")
+        if task.retired:
+            raise ValueError(
+                f"{task.description!r} was already completed on "
+                f"{task.last_completed}; its successor is the live one"
+            )
 
         task.mark_complete(on)
         successor = task.next_occurrence(on)
@@ -512,11 +559,16 @@ class Owner:
     def day_bounds(self):
         """The (start, end) minutes a plan may use.
 
-        An end at or before the start means the day simply runs on to midnight,
-        rather than leaving the scheduler with no room at all.
+        An end *before* the start reads as an overnight day, so it runs on to
+        midnight rather than leaving the scheduler no room at all. An end equal
+        to the start is the one case that really does mean no room: an owner
+        who sets both to 08:00 is saying they have no time today, and silently
+        handing them sixteen hours would schedule work they cannot do.
         """
         start = _to_minutes(self.day_start)
         end = _to_minutes(self.day_end)
+        if end == start:
+            return start, start  # an empty day, not a day of unlimited length
         return start, (end if end > start else MINUTES_IN_DAY)
 
     # -- managing pets ----------------------------------------------------
@@ -542,9 +594,31 @@ class Owner:
                 return True
         return False
 
+    def rename_pet(self, old_name, new_name):
+        """Rename a pet, keeping the lookup index in step. Returns the pet."""
+        pet = self.get_pet(old_name)
+        if pet is None:
+            raise ValueError(f"no pet named {old_name!r}")
+        if not new_name or not str(new_name).strip():
+            raise ValueError("name cannot be empty")
+        new_name = str(new_name).strip()
+        if new_name != old_name and self.get_pet(new_name) is not None:
+            raise ValueError(f"this owner already has a pet named {new_name!r}")
+        pet.name = new_name
+        self._by_name = None  # renaming invalidates every key, so rebuild lazily
+        self.touch()
+        return pet
+
     def get_pet(self, name):
         """The pet with this name, or None. O(1) rather than a scan per lookup."""
-        return self._index().get(name)
+        pet = self._index().get(name)
+        if pet is None and self.pets:
+            # A miss may just mean the index is stale — a pet renamed in place
+            # keeps the count the same, so the length check below cannot see it.
+            # Rebuilding only on a miss keeps the common hit path O(1).
+            self._by_name = None
+            pet = self._index().get(name)
+        return pet
 
     def _index(self):
         """The name -> Pet index, rebuilt if `pets` was edited behind its back."""
@@ -629,7 +703,7 @@ class Owner:
             for pet, task in self.all_tasks()
             if task.is_anchored()
             and not task.retired
-            and not task.completed
+            and not (task.is_done_for(on) if on is not None else task.completed)
             and (on is None or task.is_due_on(on))
         ]
         return sorted(live, key=lambda pair: pair[1].start_minutes())
@@ -820,8 +894,9 @@ class Scheduler:
         day = self.plan_date
 
         for pet, task in self.owner.all_tasks():
-            task.refresh_for(day)  # a tick from an earlier day does not count today
-            if task.completed:
+            # Asked, not assigned: planning a day must not edit the tasks, or
+            # previewing tomorrow would clear today's completed checkboxes.
+            if task.is_done_for(day):
                 continue  # already done; nothing to plan
             if not task.is_due_on(day):
                 self._skip(pet, task, self._not_due_reason(task, day))
@@ -1002,7 +1077,9 @@ class Scheduler:
             lines.append("No care tasks were entered, so the plan is empty.")
             return lines
 
-        done = [(pet, task) for pet, task in pairs if task.completed]
+        # is_done_for, not `completed`: build_plan no longer rolls stale ticks
+        # off, so yesterday's feeding must not be reported as done today.
+        done = [(pet, task) for pet, task in pairs if task.is_done_for(self.plan_date)]
         if done:
             lines.append(
                 "Already done, so left out of the plan: "

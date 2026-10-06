@@ -119,26 +119,51 @@ between Mochi's 07:30 feeding and Biscuit's 08:00 meds, both of which are pinned
 
 ## 🧪 Testing PawPal+
 
+Run the full suite from the project root:
+
 ```bash
-# Run the full test suite:
-pytest
-
-# Run with coverage:
-pytest --cov
+python -m pytest
 ```
 
-Sample test output:
+### What the tests cover
+
+| File | Covers |
+|---|---|
+| `tests/test_models.py` | The data classes: priority ranking, sort ordering, anchoring, completion status, adding/removing pets, and input validation. |
+| `tests/test_scheduler.py` | The planning brain: priority ordering, duration tie-breaks, the shared time budget, fixed-time anchors and their collisions, gap filling, trade-offs across pets, completion, and the explanation output. |
+| `tests/test_features.py` | The four smarter-scheduling features: time ordering, combined filtering, recurrence/successor tasks, and conflict warnings. |
+| `tests/test_edge_cases.py` | The awkward inputs: empty task lists, zero and oversized durations, a zero-minute budget, back-to-back and identical pins, tasks running past the end of the day, and every task already done. |
+| `tests/test_pawpal.py` | Starter smoke tests that the package imports and the core objects construct. |
+
+### Successful run
 
 ```
-.........................................................                [100%]
-57 passed in 0.09s
+============================= test session starts =============================
+platform win32 -- Python 3.13.1, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\justi\ai110-module2show-pawpal-starter
+plugins: anyio-4.14.2
+collected 139 items
+
+tests\test_edge_cases.py .....................                           [ 15%]
+tests\test_features.py ................................................. [ 50%]
+.                                                                        [ 51%]
+tests\test_models.py ..................................                  [ 75%]
+tests\test_pawpal.py ..                                                  [ 76%]
+tests\test_scheduler.py ................................                 [100%]
+
+============================= 139 passed in 0.17s =============================
 ```
 
-`tests/test_models.py` covers the data classes: priority ranking, sort ordering, anchoring,
-completion status, managing pets, and input validation. `tests/test_scheduler.py` covers the
-planning behaviors that matter: priority ordering, duration tie-breaks, the shared time budget,
-fixed-time anchors and their collisions, gap filling, trading off across pets, completion, and
-the explanation output.
+### Confidence Level
+
+**★★★★☆ (4 / 5)**
+
+All 139 tests pass, and they cover the behaviors the app actually depends on: priority ordering,
+the shared budget, anchors and their conflicts, gap filling, recurrence, and the edge cases that
+usually break schedulers (zero-minute budgets, oversized tasks, identical pins, an empty day).
+I'm holding back the fifth star because the suite tests `pawpal_system.py` directly — the Streamlit
+layer in `app.py` is only exercised by hand, and the scheduler has not been tried on a large,
+messy, real-world task list over many days of recurrence.
 
 ## 📐 Smarter Scheduling
 
